@@ -5,8 +5,6 @@ import os
 from datetime import datetime
 import pandas as pd
 from colorthief import ColorThief
-import discord
-from discord.ext import commands
 from PIL import Image
 import requests
 from io import BytesIO
@@ -16,8 +14,10 @@ import random
 
 
 intents = discord.Intents.default()
+intents.dm_messages = True
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+
 
 if os.path.exists('logs.json'):
     with open('logs.json', 'r') as f:
@@ -49,32 +49,105 @@ async def log(ctx, *, message: str):
 @bot.command()
 async def progress(ctx):
     user_id = str(ctx.author.id)
-    if user_id in logs:
-        user_logs = logs[user_id]
-        formatted_logs = "\n".join(f"{entry['date']}: {entry['message']}" for entry in user_logs)
-        await ctx.send(f'Your logged messages:\n\n{formatted_logs}')
+    
+    goals_message = "Your current goals:\n"
+    if user_id in goals and goals[user_id]:
+        for i, goal in enumerate(goals[user_id], 1):
+            goals_message += f"{i}. {goal}\n"
     else:
-        await ctx.send('You have no logged messages.')
+        goals_message += "No goals set.\n"
+    
+    logs_message = "\nYour logged messages:\n"
+    if user_id in logs and logs[user_id]:
+        logs_message += "\n".join(f"{i+1}. {entry['date']}: {entry['message']}" for i, entry in enumerate(logs[user_id]))
+    else:
+        logs_message += "No logged messages."
+    
+    await ctx.send(f'{goals_message}{logs_message}')
 
 @bot.command()
 async def goal(ctx, *, goal: str):
     user_id = str(ctx.author.id)
-    goals[user_id] = goal
+    if user_id not in goals:
+        goals[user_id] = []
+    goals[user_id].append(goal)
     with open('goals.json', 'w') as f:
         json.dump(goals, f, indent=4)
-    await ctx.send(f'Your goal has been set to: {goal}')
+    await ctx.send(f'Added new goal: {goal}')
+
+@bot.command()
+async def delete(ctx, type_: str, index: int):
+    user_id = str(ctx.author.id)
+    type_ = type_.lower()
+    
+    if type_ not in ['log', 'goal']:
+        await ctx.send('Please specify either "log" or "goal" as the type to delete.')
+        return
+    
+    if type_ == 'log':
+        if user_id in logs and logs[user_id]:
+            if 0 < index <= len(logs[user_id]):
+                del logs[user_id][index - 1]  # Adjust index to be zero-based
+                with open('logs.json', 'w') as f:
+                    json.dump(logs, f, indent=4)
+                await ctx.send(f'Deleted log entry at index {index}.')
+            else:
+                await ctx.send('Invalid log index.')
+        else:
+            await ctx.send('No logs found for this user.')
+            
+    elif type_ == 'goal':
+        if user_id in goals and goals[user_id]:
+            if 0 < index <= len(goals[user_id]):
+                del goals[user_id][index - 1]  # Adjust index to be zero-based
+                with open('goals.json', 'w') as f:
+                    json.dump(goals, f, indent=4)
+                await ctx.send(f'Deleted goal at index {index}.')
+            else:
+                await ctx.send('Invalid goal index.')
+        else:
+            await ctx.send('No goals found for this user.')
+
+
+@bot.command()
+async def deleteall(ctx):
+    user_id = str(ctx.author.id)
+    deleted_something = False
+    
+    if user_id in logs:
+        del logs[user_id]
+        with open('logs.json', 'w') as f:
+            json.dump(logs, f, indent=4)
+        deleted_something = True
+        await ctx.send('All your logs have been deleted.')
+    
+    if user_id in goals:
+        del goals[user_id]
+        with open('goals.json', 'w') as f:
+            json.dump(goals, f, indent=4)
+        deleted_something = True
+        await ctx.send('Your goals have been deleted.')
+    
+    if not deleted_something:
+        await ctx.send('You have no logs or goals to delete.')
+
 
 
 @bot.command()
 async def profile(ctx, member: discord.Member = None):
-    # If no member is mentioned, default to the command author
     member = member or ctx.author
     
     user_id = str(member.id)
     user_logs = logs.get(user_id, [])
-    recent_logs = user_logs[-5:]  # Get the last 5 logs
+    recent_logs = user_logs[-5:]
     formatted_logs = "\n".join(f"{entry['date']}: {entry['message']}" for entry in recent_logs)
-    user_goal = goals.get(user_id, 'No goal set')
+    
+    user_goals = goals.get(user_id, [])
+    if isinstance(user_goals, list):
+        recent_goals = user_goals[-3:]  # Get last 3 goals
+        formatted_goals = "\n".join(f"{i+1}. {goal}" for i, goal in enumerate(recent_goals))
+    else:
+        formatted_goals = "No goals set"
 
     avatar_url = member.avatar.url
     response = requests.get(avatar_url)
@@ -88,153 +161,42 @@ async def profile(ctx, member: discord.Member = None):
     embed = discord.Embed(title=f"{member.name}'s Profile", color=discord_color)
     embed.set_thumbnail(url=avatar_url)
     embed.add_field(name="Recent Logs", value=formatted_logs or "No logs available", inline=False)
-    embed.add_field(name="Goal", value=user_goal, inline=False)
+    embed.add_field(name="Goals", value=formatted_goals, inline=False)
 
     await ctx.send(embed=embed)
 
-#needs to be fixed
-BOARD_WIDTH = 20
-BOARD_HEIGHT = 10
-PADDLE_HEIGHT = 3
-BALL_SYMBOL = "⚪"
-PADDLE_SYMBOL = "▓"
-EMPTY_SYMBOL = "⬛"
-EMBED_COLOR = 0x00ff00
-
-ball_x = BOARD_WIDTH // 2
-ball_y = BOARD_HEIGHT // 2
-ball_dx = 1
-ball_dy = 1
-left_paddle_y = BOARD_HEIGHT // 2 - PADDLE_HEIGHT // 2
-right_paddle_y = BOARD_HEIGHT // 2 - PADDLE_HEIGHT // 2
-left_score = 0
-right_score = 0
-game_board = []
-game_active = False
-
-def create_board():
-    global game_board
-    game_board = [[EMPTY_SYMBOL for _ in range(BOARD_WIDTH)] for _ in range(BOARD_HEIGHT)]
-
-def update_board():
-    create_board()
-    
-    for i in range(PADDLE_HEIGHT):
-        if 0 <= left_paddle_y + i < BOARD_HEIGHT:
-            game_board[left_paddle_y + i][0] = PADDLE_SYMBOL
-        if 0 <= right_paddle_y + i < BOARD_HEIGHT:
-            game_board[right_paddle_y + i][BOARD_WIDTH-1] = PADDLE_SYMBOL
-    
-    if 0 <= ball_y < BOARD_HEIGHT and 0 <= ball_x < BOARD_WIDTH:
-        game_board[ball_y][ball_x] = BALL_SYMBOL
-
-def format_board():
-    board_str = f"Score: {left_score} - {right_score}\n\n"
-    for row in game_board:
-        board_str += "".join(row) + "\n"
-    return board_str
-
-async def move_ball():
-    global ball_x, ball_y, ball_dx, ball_dy, left_score, right_score, game_active
-
-    ball_x += ball_dx
-    ball_y += ball_dy
-
-    if ball_y <= 0 or ball_y >= BOARD_HEIGHT - 1:
-        ball_dy *= -1
-
-    if ball_x == 1 and left_paddle_y <= ball_y < left_paddle_y + PADDLE_HEIGHT:
-        ball_dx *= -1
-    elif ball_x == BOARD_WIDTH-2 and right_paddle_y <= ball_y < right_paddle_y + PADDLE_HEIGHT:
-        ball_dx *= -1
-
-    if ball_x < 0:
-        right_score += 1
-        ball_x = BOARD_WIDTH // 2
-        ball_y = BOARD_HEIGHT // 2
-    elif ball_x >= BOARD_WIDTH:
-        left_score += 1
-        ball_x = BOARD_WIDTH // 2
-        ball_y = BOARD_HEIGHT // 2
-
-    if left_score >= 5 or right_score >= 5:
-        game_active = False
-        return True
-    return False
-
 @bot.command()
-async def pong(ctx):
-    global game_active, left_score, right_score
-    
-    if game_active:
-        await ctx.send("A game is already in progress!")
-        return
+async def help(ctx):
+    help_message = """
+```
 
-    try:
-        left_score = 0
-        right_score = 0
-        game_active = True
-        
-        create_board()
-        embed = discord.Embed(description=format_board(), color=EMBED_COLOR)
-        game_message = await ctx.send(embed=embed)
+here are the available commands:
 
-        controls = ['⬆️', '⬇️', '🔼', '🔽', '❌']
-        for control in controls:
-            try:
-                await game_message.add_reaction(control)
-            except discord.errors.Forbidden:
-                await ctx.send("I don't have permission to add reactions!")
-                game_active = False
-                return
+1. !log <message>: log a message with the current date.
+   - example: `!log Completed 10 pushups`
 
-        while game_active:
-            try:
-                update_board()
-                game_over = await move_ball()
-                
-                if game_over:
-                    winner = "Left" if left_score >= 5 else "Right"
-                    embed = discord.Embed(title=f"Game Over! {winner} player wins!", 
-                                        description=format_board(), 
-                                        color=EMBED_COLOR)
-                else:
-                    embed = discord.Embed(description=format_board(), color=EMBED_COLOR)
-                
-                await game_message.edit(embed=embed)
-                await asyncio.sleep(1)
-            except discord.errors.NotFound:
-                game_active = False
-                await ctx.send("Game message was deleted. Game ended.")
-                break
-            except Exception as e:
-                game_active = False
-                await ctx.send(f"An error occurred: {str(e)}")
-                break
-                
-    except Exception as e:
-        game_active = False
-        await ctx.send(f"An error occurred: {str(e)}")
+2. !progress: view your logged messages and goals.
+   - example: `!progress`
+
+3. !goal <goal>: add a new goal.
+   - example: `!goal run a marathon`
+
+4. !delete <type> <index>: delete a log or goal by specifying the type and index.
+   - example: `!delete log 1` or `!delete goal 2`
+
+5. !deleteall: delete all your logs and goals.
+   - Example: `!deleteall`
+
+6. !profile [@user]: view your profile or another user's profile, including recent logs and goals.
+   - Example: `!profile` or `!profile @username`
+
+7. !help: display this helper menu.
+   - Example: `!help`
+```
+"""
+
+    await ctx.send(help_message)
 
 
-@bot.event
-async def on_reaction_add(reaction, user):
-    global left_paddle_y, right_paddle_y, game_active
-    
-    if user.bot or not game_active:
-        return
-
-    if reaction.emoji == '⬆️' and left_paddle_y > 0:
-        left_paddle_y -= 1
-    elif reaction.emoji == '⬇️' and left_paddle_y < BOARD_HEIGHT - PADDLE_HEIGHT:
-        left_paddle_y += 1
-    elif reaction.emoji == '🔼' and right_paddle_y > 0:
-        right_paddle_y -= 1
-    elif reaction.emoji == '🔽' and right_paddle_y < BOARD_HEIGHT - PADDLE_HEIGHT:
-        right_paddle_y += 1
-    elif reaction.emoji == '❌':
-        game_active = False
-
-    await reaction.remove(user)
     
 bot.run('tokenjak')
